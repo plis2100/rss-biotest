@@ -1,0 +1,103 @@
+name: Actualizar RSS de Biotest
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # GitHub lo inicia cada hora de lunes a sábado.
+    # Después se comprueba la hora de España.
+    - cron: "17 * * * 1-6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: actualizar-rss-biotest
+  cancel-in-progress: true
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Comprobar horario de España
+        id: horario
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ejecutar=si" >> "$GITHUB_OUTPUT"
+            echo "Ejecución manual autorizada."
+            exit 0
+          fi
+
+          DIA=$(TZ=Europe/Madrid date +%u)
+          HORA=$(TZ=Europe/Madrid date +%H)
+
+          echo "Día en España: $DIA"
+          echo "Hora en España: $HORA"
+
+          if [ "$DIA" -ge 1 ] && [ "$DIA" -le 6 ] &&
+             [ "$HORA" -ge 7 ] && [ "$HORA" -le 22 ]; then
+            echo "ejecutar=si" >> "$GITHUB_OUTPUT"
+          else
+            echo "ejecutar=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configurar Python
+        if: steps.horario.outputs.ejecutar == 'si'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        if: steps.horario.outputs.ejecutar == 'si'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Crear RSS
+        if: steps.horario.outputs.ejecutar == 'si'
+        run: |
+          python generate_feed.py
+
+          if [ ! -s docs/feed.xml ]; then
+            echo "ERROR: no se creó docs/feed.xml"
+            exit 1
+          fi
+
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          raiz = ET.parse("docs/feed.xml").getroot()
+          noticias = raiz.findall("./channel/item")
+
+          if not noticias:
+              raise RuntimeError("El RSS no contiene comunicados")
+
+          print(f"RSS válido con {len(noticias)} comunicados.")
+          PY
+
+      - name: Guardar RSS
+        if: steps.horario.outputs.ejecutar == 'si'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add docs/feed.xml
+
+          if git diff --cached --quiet; then
+            echo "No existen cambios nuevos."
+            exit 0
+          fi
+
+          git commit -m "Actualizar RSS de Biotest"
+          git pull --rebase origin main
+          git push origin main
